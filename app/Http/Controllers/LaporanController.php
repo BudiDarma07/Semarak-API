@@ -13,22 +13,41 @@ use App\Exports\LaporaExport;
 use App\Models\Notifiaksi;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\Validator; // Import Validator
 
 class LaporanController extends Controller
 {
     use AuthorizesRequests;
 
     /**
-     * Fungsi Menampilkan Formulir Laporan
+     * [API] Menampilkan daftar semua laporan.
      */
-    public function create(Aset $aset) {
+    public function index(Request $request)
+    {
+        // Fungsi ini ditambahkan khusus untuk endpoint API
+        if (!$request->wantsJson()) {
+            // Jika bukan request API, mungkin arahkan ke dashboard atau halaman lain
+            return redirect()->route('dashboard');
+        }
+
+        $laporans = Laporan::with(['aset', 'aset.kategori'])->latest()->paginate(15);
+
+        return response()->json($laporans);
+    }
+
+    /**
+     * [WEB] Fungsi Menampilkan Formulir Laporan (halaman 1)
+     */
+    public function create(Aset $aset)
+    {
         return view('laporan.create', compact('aset'));
     }
 
     /**
-     * Fungsi Memproses Data di Page 1 Formulir Laporan
+     * [WEB] Fungsi Memproses Data di Page 1 Formulir Laporan
      */
-    public function next(Request $request) {
+    public function next(Request $request)
+    {
         // Validasi input page 1
         $request->validate([
             'aset_id' => 'required|exists:asets,id_aset',
@@ -41,14 +60,14 @@ class LaporanController extends Controller
 
         if ($request->tipe_laporan == 'pemeliharaan') {
             $pertanyaans = Pertanyaan::where('kategori_id', $aset->kategori_id)
-            ->whereIn('jenis_pertanyaan', ['pemeliharaan', 'tugas'])
-            ->orderBy('urutan', 'asc')
-            ->get();
+                ->whereIn('jenis_pertanyaan', ['pemeliharaan', 'tugas'])
+                ->orderBy('urutan', 'asc')
+                ->get();
         } elseif ($request->tipe_laporan == 'tindak_lanjut') {
             $pertanyaans = Pertanyaan::where('kategori_id', $aset->kategori_id)
-            ->where('jenis_pertanyaan', 'tindak_lanjut')
-            ->orderBy('urutan', 'asc')
-            ->get();
+                ->where('jenis_pertanyaan', 'tindak_lanjut')
+                ->orderBy('urutan', 'asc')
+                ->get();
         }
 
         // Menampilkan page 2
@@ -60,22 +79,37 @@ class LaporanController extends Controller
         ]);
     }
 
-
+    /**
+     * [WEB] Fungsi untuk halaman scan QR
+     */
     public function scanQr()
     {
         return view('laporan.scan');
     }
 
     /**
-     * Fungsi Memproses Data di Page 2 Formulir Laporan
+     * [WEB & API] Menyimpan laporan baru.
+     * Untuk API, semua data dikirim dalam satu request.
+     * Untuk Web, ini adalah proses dari halaman ke-2 form.
      */
-    public function store(Request $request) {
+    public function store(Request $request)
+    {
         // Validasi data umum
-        $request->validate([
+        $validator = Validator::make($request->all(), [
             'aset_id' => 'required|exists:asets,id_aset',
             'nama_teknisi' => 'required|string|max:255',
             'tipe_laporan' => 'required|in:pemeliharaan,tindak_lanjut',
+            'jawaban' => 'sometimes|array', // 'jawaban' bisa ada atau tidak
+            'jawaban.*' => 'nullable|string', // setiap jawaban boleh kosong
+            'dokumentasi' => 'sometimes|array',
+            'dokumentasi.*' => 'image|mimes:jpeg,png,jpg|max:2048' // setiap file adalah gambar
         ]);
+
+        if ($validator->fails() && $request->wantsJson()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        } elseif ($validator->fails()) {
+            return back()->withErrors($validator)->withInput();
+        }
 
         $laporan = Laporan::create([
             'aset_id' => $request->aset_id,
@@ -84,8 +118,9 @@ class LaporanController extends Controller
             'status' => 'Belum Proses',
         ]);
 
-        if($request->has('jawaban')) {
-            foreach($request->jawaban as $pertanyaan_id => $jawaban_text) {
+        // Proses jawaban
+        if ($request->has('jawaban')) {
+            foreach ($request->jawaban as $pertanyaan_id => $jawaban_text) {
                 if (!empty($jawaban_text)) {
                     Jawaban::create([
                         'laporan_id' => $laporan->id_laporan,
@@ -96,8 +131,9 @@ class LaporanController extends Controller
             }
         }
 
-        if($request->hasFile('dokumentasi')) {
-            foreach($request->file('dokumentasi') as $file) {
+        // Proses upload dokumentasi
+        if ($request->hasFile('dokumentasi')) {
+            foreach ($request->file('dokumentasi') as $file) {
                 $path = $file->store('laporan_dokumentasi', 'public');
                 Dokumentasi::create([
                     'laporan_id' => $laporan->id_laporan,
@@ -108,45 +144,69 @@ class LaporanController extends Controller
             }
         }
 
+        // Buat notifikasi jika tindak lanjut
         if ($laporan->tipe_laporan == 'tindak_lanjut') {
             Notifiaksi::create([
                 'laporan_id' => $laporan->id_laporan,
                 'pesan' => "Butuh Tindak Lajut - " . $laporan->aset->nama_aset,
             ]);
         }
-
+        
+        // [MODIFIKASI API] Respon untuk API
+        if ($request->wantsJson()) {
+            return response()->json([
+                'message' => 'Laporan berhasil disimpan!',
+                'data' => $laporan->load('jawabans', 'dokumentasis')
+            ], 201);
+        }
+        
+        // Respon untuk Web
         $aset = Aset::find($request->aset_id);
         return redirect()->route('laporan.create', ['aset' => $aset->kode_aset])->with('success', 'Laporan berhasil disimpan!');
     }
 
+
     /**
-     * Fungsi Menampilkan Laporan di Dashboard
+     * [WEB & API] Menampilkan detail satu laporan.
      */
-    public function show(Laporan $laporan) {
+    public function show(Request $request, Laporan $laporan)
+    {
         $laporan->load('aset', 'jawabans.pertanyaan', 'dokumentasis');
+
+        // [MODIFIKASI API] Respon untuk API
+        if ($request->wantsJson()) {
+            return response()->json($laporan);
+        }
 
         return view('laporan.show', compact('laporan'));
     }
 
     /**
-     * Fungsi Menghapus Laporan Dari Database Beserta Dokumentasinya
+     * [WEB & API] Menghapus Laporan Dari Database Beserta Dokumentasinya
      */
-    public function destroy(Laporan $laporan) {
-        // Hapus file dokumentasi dari laporan
+    public function destroy(Request $request, Laporan $laporan)
+    {
+        // Hapus file dokumentasi dari storage
         foreach ($laporan->dokumentasis as $dokumentasi) {
             Storage::disk('public')->delete($dokumentasi->file_path);
         }
 
-        // Hapus data laporan
+        // Hapus data laporan (otomatis menghapus jawaban dan dokumentasi dari tabelnya karena relasi)
         $laporan->delete();
+
+        // [MODIFIKASI API] Respon untuk API
+        if ($request->wantsJson()) {
+            return response()->json(['message' => 'Laporan berhasil dihapus.']);
+        }
 
         return redirect()->route('dashboard')->with('success', 'Laporan berhasil dihapus');
     }
 
     /**
-     * Fungsi Mengubah Status Laporan 
+     * [WEB & API] Mengubah Status Laporan 
      */
-    public function updateStatus(Request $request, Laporan $laporan) {
+    public function updateStatus(Request $request, Laporan $laporan)
+    {
         $this->authorize('update-status-laporan');
 
         $request->validate([
@@ -160,56 +220,46 @@ class LaporanController extends Controller
             Notifiaksi::where('laporan_id', $laporan->id_laporan)->delete();
         }
 
+        // [MODIFIKASI API] Respon untuk API
+        if ($request->wantsJson()) {
+            return response()->json([
+                'message' => 'Status laporan berhasil diperbarui.',
+                'data' => $laporan
+            ]);
+        }
+
         return redirect()->route('dashboard')->with('success', 'Status laporan berhasil diperbarui');
     }
 
-    /**
-     * Fungsi Menampilkan Halaman Download Laporan Excel
-     */
-    public function export() {
+    // Metode di bawah ini spesifik untuk web dan tidak perlu diubah untuk API
+    
+    public function export()
+    {
         return view('laporan.export');
     }
 
-    /** 
-     * Fungsi Mendowload Laporan Excel Tanpa Dokumentasi
-    */
-    public function download(Request $request) {
-        // Ambil data filter
+    public function download(Request $request)
+    {
         $month = $request->input('month');
         $year = $request->input('year');
         $tipe_laporan = $request->input('tipe_laporan');
 
         $query = Laporan::query();
 
-        if ($month) {
-            $query->whereMonth('created_at', $month);
-        }
-        if ($year) {
-            $query->whereYear('created_at', $year);
-        }
-        if ($tipe_laporan) {
-            $query->where('tipe_laporan', $tipe_laporan);
-        }
+        if ($month) $query->whereMonth('created_at', $month);
+        if ($year) $query->whereYear('created_at', $year);
+        if ($tipe_laporan) $query->where('tipe_laporan', $tipe_laporan);
 
-        // Pengecekan data yang kosong
         if (!$query->exists()) {
-            // Pesan error jika tidak ada
             return back()->with('error', 'Tidak ada data laporan yang ditemukan untuk filter yang dipilih.');
         }
         
-        $namaBulan = [
-            1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
-            5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
-            9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember'
-        ];
+        $namaBulan = [1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April', 5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus', 9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember'];
         $tipePart = $tipe_laporan ? ucfirst(str_replace('_', ' ', $tipe_laporan)) : 'SemuaLaporan';
         $bulanPart = $month ? $namaBulan[(int)$month] : 'SemuaBulan';
         $tahunPart = $year ? $year : 'SemuaTahun';
-
-        // Penamaan laporan
         $fileName = 'Laporan_' . $tipePart . '_' . $bulanPart . '_' . $tahunPart . '.xlsx';
 
-        // Panggil class LaporanExport untuk men-download file
         return Excel::download(new LaporaExport($month, $year, $tipe_laporan), $fileName);
     }
 }

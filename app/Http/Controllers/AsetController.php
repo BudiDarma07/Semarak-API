@@ -6,7 +6,7 @@ use App\Models\Aset;
 use App\Models\Kategori;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
-use SimpleSoftwareIO\QrCode\Facades\QrCode; // Ditambahkan
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 class AsetController extends Controller
 {
@@ -20,22 +20,27 @@ class AsetController extends Controller
 
         if ($search) {
             $query->where('nama_aset', 'like', "%{$search}%")
-            ->orWhere('kode_aset', 'like', "%{$search}%")
-            ->orWhere('lokasi', 'like', "%{$search}%");
+                ->orWhere('kode_aset', 'like', "%{$search}%")
+                ->orWhere('lokasi', 'like', "%{$search}%");
         }
 
         $asets = $query->paginate(10);
+
+        // [MODIFIKASI API] Cek jika request meminta JSON
+        if ($request->wantsJson()) {
+            return response()->json($asets);
+        }
+
         return view('aset.index', compact('asets', 'search'));
     }
+
+    /**
+     * Display QR Code page for a specific asset.
+     */
     public function qrcode(Aset $aset)
     {
-        // URL ini akan menjadi isi dari QR code
         $url = route('laporan.create', ['aset' => $aset->kode_aset]);
-
-        // Hasilkan QR code
         $qrCode = QrCode::size(300)->generate($url);
-
-        // Tampilkan view dengan QR code
         return view('aset.qrcode', compact('aset', 'qrCode'));
     }
 
@@ -58,9 +63,21 @@ class AsetController extends Controller
             'nama_aset' => 'required|string|max:255',
             'kategori_id' => 'required|exists:kategoris,id_kategori',
             'lokasi' => 'required|string|max:255',
+            // Menambahkan validasi lain jika ada di form, sesuaikan jika perlu
+            // 'tanggal_pembelian' => 'nullable|date',
+            // 'harga' => 'nullable|numeric',
+            // 'kondisi' => 'nullable|string',
         ]);
 
-        Aset::create($validated);
+        $aset = Aset::create($validated);
+
+        // [MODIFIKASI API] Cek jika request meminta JSON
+        if ($request->wantsJson()) {
+            return response()->json([
+                'message' => 'Aset baru berhasil ditambahkan.',
+                'data' => $aset
+            ], 201); // 201 = Created
+        }
 
         return redirect()->route('aset.index')->with('success', 'Aset baru berhasil ditambahkan.');
     }
@@ -68,9 +85,16 @@ class AsetController extends Controller
     /**
      * Display the specified resource.
      */
-    public function show(Aset $aset)
+    public function show(Request $request, Aset $aset)
     {
-        //
+        // [MODIFIKASI API] Mengisi fungsi show untuk API
+        if ($request->wantsJson()) {
+            // Muat relasi kategori agar ikut tampil di JSON
+            return response()->json($aset->load('kategori'));
+        }
+
+        // Untuk web, kita arahkan ke halaman edit
+        return redirect()->route('aset.edit', $aset);
     }
 
     /**
@@ -99,18 +123,38 @@ class AsetController extends Controller
 
         $aset->update($validated);
 
+        // [MODIFIKASI API] Cek jika request meminta JSON
+        if ($request->wantsJson()) {
+            return response()->json([
+                'message' => 'Data aset berhasil diperbarui.',
+                'data' => $aset
+            ]);
+        }
+
         return redirect()->route('aset.index')->with('success', 'Data aset berhasil diperbarui.');
     }
 
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(Aset $aset)
+    public function destroy(Request $request, Aset $aset)
     {
         try {
             $aset->delete();
+
+            // [MODIFIKASI API] Cek jika request meminta JSON
+            if ($request->wantsJson()) {
+                return response()->json(['message' => 'Aset berhasil dihapus.']);
+            }
+
             return redirect()->route('aset.index')->with('success', 'Aset berhasil dihapus.');
         } catch (\Illuminate\Database\QueryException $e) {
+            // [MODIFIKASI API] Cek jika request meminta JSON
+            if ($request->wantsJson()) {
+                // Mengirimkan status error yang sesuai (409 Conflict)
+                return response()->json(['message' => 'Aset tidak dapat dihapus karena masih digunakan di laporan lain.'], 409);
+            }
+
             return redirect()->route('aset.index')->with('error', 'Aset tidak dapat dihapus karena masih digunakan di laporan lain.');
         }
     }
